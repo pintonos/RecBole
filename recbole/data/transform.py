@@ -20,6 +20,7 @@ def construct_transform(config):
     else:
         str2transform = {
             "mask_itemseq": MaskItemSequence,
+            "multi_aug_itemseq": MultiAugItemSequence,
             "inverse_itemseq": InverseItemSequence,
             "crop_itemseq": CropItemSequence,
             "reorder_itemseq": ReorderItemSequence,
@@ -38,6 +39,84 @@ class Equal:
         pass
 
     def __call__(self, dataset, interaction):
+        return interaction
+
+
+class MultiAugItemSequence:
+    """
+    Random augmentations for item sequence.
+    """
+
+    def __init__(self, config):
+        self.ITEM_SEQ = config["ITEM_ID_FIELD"] + config["LIST_SUFFIX"]
+        self.AUG_ITEM_SEQ = "Aug_" + self.ITEM_SEQ
+        self.ITEM_SEQ_LEN = config["ITEM_LIST_LENGTH_FIELD"]
+        self.AUG_ITEM_SEQ_LEN = "Aug_" + self.ITEM_SEQ_LEN
+
+        self.mask_ratio = config["mask_ratio"]
+        self.crop_eta = config["eta"]
+        self.reorder_beta = config["beta"]
+
+        self.item_mask = MaskItemSequence(config=config)
+        self.item_crop = CropItemSequence(config=config)
+        self.item_reorder = ReorderItemSequence(config=config)
+
+        self.AUG_ITEM_SEQ_1 = self.AUG_ITEM_SEQ + '_1'
+        self.AUG_ITEM_SEQ_LEN_1 = self.AUG_ITEM_SEQ_LEN + '_1'
+        self.AUG_ITEM_SEQ_2 = self.AUG_ITEM_SEQ + '_2'
+        self.AUG_ITEM_SEQ_LEN_2 = self.AUG_ITEM_SEQ_LEN + '_2'
+
+        config["AUG_ITEM_SEQ_1"] = self.AUG_ITEM_SEQ_1
+        config["AUG_ITEM_SEQ_LEN_1"] = self.AUG_ITEM_SEQ_LEN_1
+        config["AUG_ITEM_SEQ_2"] = self.AUG_ITEM_SEQ_2
+        config["AUG_ITEM_SEQ_LEN_2"] = self.AUG_ITEM_SEQ_LEN_2
+
+    def __call__(self, dataset, interaction):
+        item_seq = interaction[self.ITEM_SEQ]
+        item_seq_len = interaction[self.ITEM_SEQ_LEN]
+        mask_item_seq = self.item_mask(dataset, interaction)[self.item_mask.MASK_ITEM_SEQ]
+        crop_item_seq = self.item_crop(dataset, interaction)[self.item_crop.CROP_ITEM_SEQ]
+        reorder_item_seq = self.item_reorder(dataset, interaction)[self.item_reorder.REORDER_ITEM_SEQ]
+
+        aug_seq1, aug_seq2 = [], []
+        for i, (seq, length) in enumerate(zip(item_seq, item_seq_len)):
+            if length > 1:
+                switch = random.sample(range(3), k=2)
+            else:
+                switch = [3, 3]
+                aug_seq = seq
+
+            if switch[0] == 0:
+                aug_seq = crop_item_seq[i]
+            elif switch[0] == 1:
+                aug_seq = mask_item_seq[i]
+            elif switch[0] == 2:
+                aug_seq = reorder_item_seq[i]
+
+            aug_seq1.append(aug_seq)
+
+            if switch[1] == 0:
+                aug_seq = crop_item_seq[i]
+            elif switch[1] == 1:
+                aug_seq = mask_item_seq[i]
+            elif switch[1] == 2:
+                aug_seq = reorder_item_seq[i]
+
+            aug_seq2.append(aug_seq)
+
+        aug_seq1 = torch.stack(aug_seq1)
+        aug_seq2 = torch.stack(aug_seq2)
+
+        aug_seq_len1 = aug_seq1.bool().sum(dim=1)
+        aug_seq_len2 = aug_seq2.bool().sum(dim=1)
+
+        new_dict = {
+            self.AUG_ITEM_SEQ_1: aug_seq1,
+            self.AUG_ITEM_SEQ_LEN_1: aug_seq_len1,
+            self.AUG_ITEM_SEQ_2: aug_seq2,
+            self.AUG_ITEM_SEQ_LEN_2: aug_seq_len2,
+        }
+        interaction.update(Interaction(new_dict))
         return interaction
 
 
@@ -191,7 +270,6 @@ class MaskItemSequence:
             interaction.update(Interaction(new_dict))
         return interaction
 
-
 class InverseItemSequence:
     """
     inverse the seq_item, like this
@@ -289,9 +367,9 @@ class ReorderItemSequence:
 
             shuffle_index = list(range(reorder_begin, reorder_begin + reorder_len))
             random.shuffle(shuffle_index)
-            reorder_item_seq[reorder_begin : reorder_begin + reorder_len] = (
-                reorder_item_seq[shuffle_index]
-            )
+            reorder_item_seq[
+                reorder_begin : reorder_begin + reorder_len
+            ] = reorder_item_seq[shuffle_index]
 
             reorder_seq_list.append(
                 torch.tensor(reorder_item_seq, dtype=torch.long, device=device)
