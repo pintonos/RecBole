@@ -263,7 +263,7 @@ def get_flops(model, dataset, device, logger, transform, verbose=False):
         return 1
     if model.__class__.__name__ == "Pop":
         return 1
-    if model.__class__.__name__ == "ICLRec":
+    if model.__class__.__name__ == "ICLRec" or model.__class__.__name__ == "ICSRec":
         return 1
 
     import copy
