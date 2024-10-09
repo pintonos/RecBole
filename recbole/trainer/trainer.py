@@ -1487,7 +1487,6 @@ class ICSRecTrainer(Trainer):
         self.model = model
 
     def _train_epoch(self, train_data, epoch_idx, loss_func=None, show_progress=False):
-        #if epoch_idx >= self.warm_up_epochs:
         self.logger.info("Intention Clustering")
-        #self.model.cluster_intention(train_data)
+        self.model.cluster_intention(train_data)
         return super()._train_epoch(train_data, epoch_idx, loss_func, show_progress)

@@ -1665,23 +1665,21 @@ class KMeans(object):
         clus.max_points_per_centroid = max_points_per_centroid
         clus.min_points_per_centroid = min_points_per_centroid
 
-        index_flat = faiss.IndexFlatL2(self.hidden_size)  # build a flat (CPU) index
+        index_flat = faiss.IndexFlatL2(self.hidden_size)  
         if self.device.type != 'cpu':
-            res = faiss.StandardGpuResources()  # use a single GPU
+            res = faiss.StandardGpuResources()
             index_flat = faiss.index_cpu_to_gpu(res, 0, index_flat)
         return clus, index_flat
 
     def train(self, x):
-        # train to get centroids
         if x.shape[0] > self.num_cluster:
             self.clus.train(x=x.cpu().detach().numpy(), index=self.index)
         centroids = faiss.vector_to_array(self.clus.centroids).reshape(self.num_cluster, self.hidden_size)
         centroids = torch.Tensor(centroids).to(self.device)
         self.centroids = nn.functional.normalize(centroids, p=2, dim=1)
-        self.centroids = centroids
 
     def query(self, x):
-        D, I = self.index.search(x.cpu().detach().numpy(), 1)  # for each sample, find cluster distance and assignments
+        D, I = self.index.search(x.cpu().detach().numpy(), 1)
         x2cluster = [int(n[0]) for n in I]
         x2cluster = torch.LongTensor(x2cluster).to(self.device)
         return x2cluster, self.centroids[x2cluster]

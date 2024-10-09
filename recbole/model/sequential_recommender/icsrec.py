@@ -41,11 +41,8 @@ class ICSRec(SequentialRecommender):
         self.sim = config['sim']
         self.temperature = config['temperature']
 
-        self.TARGET_ITEM = "Target_" + self.ITEM_ID
-        self.TARGET_ITEM_SEQ_1 = "Target_1_" + self.ITEM_SEQ
-        self.TARGET_ITEM_SEQ_2 = "Target_2_" + self.ITEM_SEQ
-        self.TARGET_ITEM_SEQ_LEN_1 = self.TARGET_ITEM_SEQ_1 + config["ITEM_LIST_LENGTH_FIELD"]
-        self.TARGET_ITEM_SEQ_LEN_2 = self.TARGET_ITEM_SEQ_2 + config["ITEM_LIST_LENGTH_FIELD"]
+        self.TARGET_ITEM_SEQ = "Target_" + self.ITEM_SEQ
+        self.TARGET_ITEM_SEQ_LEN = self.TARGET_ITEM_SEQ + config["ITEM_LIST_LENGTH_FIELD"]
 
         self.cicl_loss_weight = config['cicl_loss_weight']
         self.ficl_loss_weight = config['ficl_loss_weight']
@@ -107,12 +104,13 @@ class ICSRec(SequentialRecommender):
     def cluster_intention(self, train_data):
         kmeans_training_data = []
         for batch_idx, interaction in enumerate(train_data):
+            interaction = interaction.to(self.device)
             item_seq = interaction[self.ITEM_SEQ]
             item_seq_len = interaction[self.ITEM_SEQ_LEN]
             seq_output = self.forward(item_seq, item_seq_len)
-            kmeans_training_data.append(seq_output.detach().cpu().numpy())
+            kmeans_training_data.append(seq_output.detach().cpu())
 
-        kmeans_training_data = np.concatenate(kmeans_training_data, axis=0)
+        kmeans_training_data = torch.concat(kmeans_training_data, axis=0)
         kmeans_training_data_t = [kmeans_training_data]
 
         for i, clusters in enumerate(self.clusters_t):
@@ -160,15 +158,8 @@ class ICSRec(SequentialRecommender):
         item_seq = interaction[self.ITEM_SEQ]
         item_seq_len = interaction[self.ITEM_SEQ_LEN]
         pos_items = interaction[self.POS_ITEM_ID]
-
         seq_output = self.forward(item_seq, item_seq_len)
-
-        # build intent clusters
-        if self.cluster.trainable:
-            self.cluster.train(self.item_embedding.weight)
-            self.cluster.trainable = False
-
-        if self.loss_type == "BPR" or self.loss_type == "BCE":
+        if self.loss_type == "BPR":
             neg_items = interaction[self.NEG_ITEM_ID]
             pos_items_emb = self.item_embedding(pos_items)
             neg_items_emb = self.item_embedding(neg_items)
@@ -176,19 +167,16 @@ class ICSRec(SequentialRecommender):
             neg_score = torch.sum(seq_output * neg_items_emb, dim=-1)  # [B]
             loss = self.loss_fct(pos_score, neg_score)
         else:  # self.loss_type = 'CE'
-            test_item_emb = self.item_embedding.weight[:self.n_items]  # unpad the augmentation mask
+            test_item_emb = self.item_embedding.weight
             logits = torch.matmul(seq_output, test_item_emb.transpose(0, 1))
             loss = self.loss_fct(logits, pos_items)
 
-        target_item = interaction[self.TARGET_ITEM]
-        target_item_seq_1 = interaction[self.TARGET_ITEM_SEQ_1]
-        target_item_seq_len_1 = interaction[self.TARGET_ITEM_SEQ_LEN_1]
+        target_item_seq = interaction[self.TARGET_ITEM_SEQ]
+        target_item_seq_len = interaction[self.TARGET_ITEM_SEQ_LEN]
+        target_seq_output = self.forward(target_item_seq, target_item_seq_len)
 
-        coarse_intent_1 = self.forward(item_seq, item_seq_len)
-        coarse_intent_2 = self.forward(target_item_seq_1, target_item_seq_len_1)
-
-        cicl_loss = self.cicl_loss(coarse_intent_1, coarse_intent_2, pos_items)
-        ficl_loss = self.ficl_loss(coarse_intent_1, coarse_intent_2, self.clusters_t[0])
+        cicl_loss = self.cicl_loss(seq_output, target_seq_output, pos_items)
+        ficl_loss = self.ficl_loss(seq_output, target_seq_output, self.clusters_t[0])
 
         return loss + (self.cicl_loss_weight * cicl_loss) + (self.ficl_loss_weight * ficl_loss)
 
