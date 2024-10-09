@@ -1,22 +1,16 @@
 # -*- coding: utf-8 -*-
-# @Time    : 2023/6/15 14:10
+# @Time    : 2024/10/09 14:10
 # @Author  : Andreas Peintner
 # @Email   : a.peintner@gmx.net
 
 """
-https://github.com/salesforce/ICLRec
-################################################
+Reference:
+    Xiuyuan Qin et al. "Intent Contrastive Learning with Cross Subsequences for Sequential Recommendation." in WSDM 2024.
 
 Reference:
-    Chen et al. "Self-Attentive Sequential Recommendation." in WWW 2022.
-
-Reference:
-    https://github.com/salesforce/ICLRec
+    https://github.com/QinHsiu/ICSRec
 
 """
-
-import math
-import random
 
 import numpy as np
 import torch
@@ -43,15 +37,18 @@ class ICSRec(SequentialRecommender):
         self.layer_norm_eps = config['layer_norm_eps']
 
         self.n_clusters = config['n_clusters']
+        self.f_neg = config['f_neg']
+        self.sim = config['sim']
         self.temperature = config['temperature']
 
-        self.AUG_ITEM_SEQ_1 = config["AUG_ITEM_SEQ_1"]
-        self.AUG_ITEM_SEQ_LEN_1 = config["AUG_ITEM_SEQ_LEN_1"]
-        self.AUG_ITEM_SEQ_2 = config["AUG_ITEM_SEQ_2"]
-        self.AUG_ITEM_SEQ_LEN_2 = config["AUG_ITEM_SEQ_LEN_2"]
+        self.TARGET_ITEM = "Target_" + self.ITEM_ID
+        self.TARGET_ITEM_SEQ_1 = "Target_1_" + self.ITEM_SEQ
+        self.TARGET_ITEM_SEQ_2 = "Target_2_" + self.ITEM_SEQ
+        self.TARGET_ITEM_SEQ_LEN_1 = self.TARGET_ITEM_SEQ_1 + config["ITEM_LIST_LENGTH_FIELD"]
+        self.TARGET_ITEM_SEQ_LEN_2 = self.TARGET_ITEM_SEQ_2 + config["ITEM_LIST_LENGTH_FIELD"]
 
-        self.cl_weight = config['cl_weight']
-        self.intent_cl_weight = config['intent_cl_weight']
+        self.cicl_loss_weight = config['cicl_loss_weight']
+        self.ficl_loss_weight = config['ficl_loss_weight']
 
         self.initializer_range = config['initializer_range']
         self.loss_type = config['loss_type']
@@ -67,7 +64,9 @@ class ICSRec(SequentialRecommender):
         self.clusters_t = [self.clusters]
 
         # define layers and loss
-        self.item_embedding = nn.Embedding(self.n_items + 1, self.hidden_size, padding_idx=0)
+        self.item_embedding = nn.Embedding(
+            self.n_items, self.hidden_size, padding_idx=0
+        )
         self.position_embedding = nn.Embedding(self.max_seq_length, self.hidden_size)
         self.trm_encoder = TransformerEncoder(
             n_layers=self.n_layers,
@@ -181,40 +180,35 @@ class ICSRec(SequentialRecommender):
             logits = torch.matmul(seq_output, test_item_emb.transpose(0, 1))
             loss = self.loss_fct(logits, pos_items)
 
-        coarse_intent_1 = self.model(subsequence_1)
-        coarse_intent_2 = self.model(subsequence_2)
+        target_item = interaction[self.TARGET_ITEM]
+        target_item_seq_1 = interaction[self.TARGET_ITEM_SEQ_1]
+        target_item_seq_len_1 = interaction[self.TARGET_ITEM_SEQ_LEN_1]
 
-        cicl_loss = self.cicl_loss([coarse_intent_1, coarse_intent_2], target_pos_1)
-        ficl_loss = self.ficl_loss([coarse_intent_1, coarse_intent_2], self.clusters_t[0])
+        coarse_intent_1 = self.forward(item_seq, item_seq_len)
+        coarse_intent_2 = self.forward(target_item_seq_1, target_item_seq_len_1)
+
+        cicl_loss = self.cicl_loss(coarse_intent_1, coarse_intent_2, pos_items)
+        ficl_loss = self.ficl_loss(coarse_intent_1, coarse_intent_2, self.clusters_t[0])
 
         return loss + (self.cicl_loss_weight * cicl_loss) + (self.ficl_loss_weight * ficl_loss)
 
-    def cicl_loss(self, coarse_intents, target_item):
-        coarse_intent_1,coarse_intent_2=coarse_intents[0],coarse_intents[1]
-        sem_nce_logits, sem_nce_labels = self.info_nce(coarse_intent_1[:, -1, :], coarse_intent_2[:, -1, :],
-                                                       self.args.temperature, coarse_intent_1.shape[0], self.sim,
-                                                       target_item[:, -1])
+    def cicl_loss(self, coarse_intent_1, coarse_intent_2, target_item):
+        sem_nce_logits, sem_nce_labels = self.info_nce(coarse_intent_1, coarse_intent_2,
+                                                       self.temperature, coarse_intent_1.shape[0], self.sim,
+                                                       target_item)
         cicl_loss = nn.CrossEntropyLoss()(sem_nce_logits, sem_nce_labels)
         return cicl_loss
 
 
-    def ficl_loss(self, sequences, clusters_t):
-        output = sequences[0][:,-1,:]
-        intent_n = output.view(-1, output.shape[-1])  # [BxH]
-        intent_n = intent_n.detach().cpu().numpy()
-        intent_id, seq_to_v = clusters_t[0].query(intent_n)
-
-        seq_to_v = seq_to_v.view(seq_to_v.shape[0], -1) # [BxH]
-        a, b = self.info_nce(output.view(output.shape[0], -1), seq_to_v, self.args.temperature, output.shape[0], sim=self.sim,intent_id=intent_id)
+    def ficl_loss(self, coarse_intent_1, coarse_intent_2, clusters_t):
+        intent_id, seq_to_v = clusters_t[0].query(coarse_intent_1)
+        a, b = self.info_nce(coarse_intent_1, seq_to_v, self.temperature, coarse_intent_1.shape[0], sim=self.sim, intent_id=intent_id)
         loss_n_0 = nn.CrossEntropyLoss()(a, b)
 
-        output_s = sequences[1][:,-1,:]
-        intent_n = output_s.view(-1, output_s.shape[-1])
-        intent_n = intent_n.detach().cpu().numpy()
-        intent_id, seq_to_v_1 = clusters_t[0].query(intent_n)  # [BxH]
-        seq_to_v_1 = seq_to_v_1.view(seq_to_v_1.shape[0], -1) # [BxH]
-        a, b = self.info_nce(output_s.view(output_s.shape[0], -1), seq_to_v_1, self.args.temperature, output_s.shape[0], sim=self.sim,intent_id=intent_id)
+        intent_id, seq_to_v_1 = clusters_t[0].query(coarse_intent_2)  # [BxH]
+        a, b = self.info_nce(coarse_intent_2, seq_to_v_1, self.temperature, coarse_intent_2.shape[0], sim=self.sim, intent_id=intent_id)
         loss_n_1 = nn.CrossEntropyLoss()(a, b)
+
         ficl_loss = loss_n_0 + loss_n_1
 
         return ficl_loss
@@ -253,7 +247,7 @@ class ICSRec(SequentialRecommender):
 
         positive_samples = torch.cat((sim_i_j, sim_j_i), dim=0).reshape(N, 1)
 
-        if self.args.f_neg:
+        if self.f_neg:
             mask = self.mask_correlated_samples_(intent_id)
             negative_samples = sim
             negative_samples[mask == 0] = float("-inf")
@@ -266,8 +260,6 @@ class ICSRec(SequentialRecommender):
         return logits, labels
 
     def predict(self, interaction):
-        self.cluster.trainable = True
-
         item_seq = interaction[self.ITEM_SEQ]
         item_seq_len = interaction[self.ITEM_SEQ_LEN]
         test_item = interaction[self.ITEM_ID]
@@ -280,6 +272,6 @@ class ICSRec(SequentialRecommender):
         item_seq = interaction[self.ITEM_SEQ]
         item_seq_len = interaction[self.ITEM_SEQ_LEN]
         seq_output = self.forward(item_seq, item_seq_len)
-        test_items_emb = self.item_embedding.weight[:self.n_items]  # unpad the augmentation mask
+        test_items_emb = self.item_embedding.weight
         scores = torch.matmul(seq_output, test_items_emb.transpose(0, 1))  # [B n_items]
         return scores

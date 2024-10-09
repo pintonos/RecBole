@@ -389,8 +389,11 @@ class TargetItemSequence:
         self.ITEM_ID = config["ITEM_ID_FIELD"]
         self.ITEM_SEQ = config["ITEM_ID_FIELD"] + config["LIST_SUFFIX"]
         self.ITEM_SEQ_LEN = config["ITEM_LIST_LENGTH_FIELD"]
+        self.TARGET_ITEM = "Target_" + self.ITEM_ID
         self.TARGET_ITEM_SEQ_1 = "Target_1_" + self.ITEM_SEQ
         self.TARGET_ITEM_SEQ_2 = "Target_2_" + self.ITEM_SEQ
+        self.TARGET_ITEM_SEQ_LEN_1 = self.TARGET_ITEM_SEQ_1 + config["ITEM_LIST_LENGTH_FIELD"]
+        self.TARGET_ITEM_SEQ_LEN_2 = self.TARGET_ITEM_SEQ_2 + config["ITEM_LIST_LENGTH_FIELD"]
         config["TARGET_ITEM_SEQ_1"] = self.TARGET_ITEM_SEQ_1
         config["TARGET_ITEM_SEQ_2"] = self.TARGET_ITEM_SEQ_2
 
@@ -409,16 +412,26 @@ class TargetItemSequence:
         item_seq = item_seq.cpu().numpy()
         item_seq_len = item_seq_len.cpu().numpy()
 
-        target_seq_1, target_seq_2 = [], []
+        target_seq_1, target_seq_2, target_item_seq = [], [], []
         for target_item in target_items:
             target_seqs = self.target_seq[target_item]
             target_seq_1.append(random.choice(target_seqs))
             target_seq_2.append(random.choice(target_seqs))
+            target_item_seq.append([target_item] + [0] * (item_seq.shape[1] - 1))
 
         target_seq_1 = torch.tensor(target_seq_1, dtype=torch.long, device=device)
         target_seq_2 = torch.tensor(target_seq_2, dtype=torch.long, device=device)
+        target_item_seq = torch.tensor(target_item_seq, dtype=torch.long, device=device)
 
-        new_dict = {self.TARGET_ITEM_SEQ_1: target_seq_1, self.TARGET_ITEM_SEQ_2: target_seq_2}
+        target_seq_len_1 = target_seq_1.bool().sum(dim=1)
+        target_seq_len_2 = target_seq_2.bool().sum(dim=1)
+
+        new_dict = {self.TARGET_ITEM_SEQ_1: target_seq_1,
+                    self.TARGET_ITEM_SEQ_LEN_1: target_seq_len_1,
+                    self.TARGET_ITEM_SEQ_2: target_seq_2,
+                    self.TARGET_ITEM_SEQ_LEN_2: target_seq_len_2,
+                    self.TARGET_ITEM: target_item_seq}
+
         interaction.update(Interaction(new_dict))
         return interaction
 

@@ -10,9 +10,11 @@ initializer_range: 0.02
 loss_type: 'CE'
 
 n_clusters: 512
+f_neg: False
+sim: 'dot'
 temperature: 1.0
 
 transform: "target_itemseq"
 
-intent_cl_weight: 0.1
-cl_weight: 0.1
+cicl_loss_weight: 0.3
+ficl_loss_weight: 0.1
