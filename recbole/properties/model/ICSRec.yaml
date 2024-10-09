@@ -12,5 +12,7 @@ loss_type: 'CE'
 n_clusters: 512
 temperature: 1.0
 
+transform: "target_itemseq"
+
 intent_cl_weight: 0.1
 cl_weight: 0.1

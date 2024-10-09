@@ -1490,5 +1490,4 @@ class ICSRecTrainer(Trainer):
         #if epoch_idx >= self.warm_up_epochs:
         self.logger.info("Intention Clustering")
         self.model.cluster_intention(train_data)
-        self.model.e_step()
         return super()._train_epoch(train_data, epoch_idx, loss_func, show_progress)

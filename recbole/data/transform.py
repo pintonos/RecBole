@@ -11,7 +11,7 @@ from copy import deepcopy
 from recbole.data.interaction import Interaction, cat_interactions
 
 
-def construct_transform(config):
+def construct_transform(config, dataset):
     """
     Transformation for batch data.
     """
@@ -21,6 +21,7 @@ def construct_transform(config):
         str2transform = {
             "mask_itemseq": MaskItemSequence,
             "multi_aug_itemseq": MultiAugItemSequence,
+            "target_itemseq": TargetItemSequence,
             "inverse_itemseq": InverseItemSequence,
             "crop_itemseq": CropItemSequence,
             "reorder_itemseq": ReorderItemSequence,
@@ -31,7 +32,7 @@ def construct_transform(config):
                 f"There is no transform named '{config['transform']}'"
             )
 
-        return str2transform[config["transform"]](config)
+        return str2transform[config["transform"]](config, dataset)
 
 
 class Equal:
@@ -375,6 +376,49 @@ class ReorderItemSequence:
                 torch.tensor(reorder_item_seq, dtype=torch.long, device=device)
             )
         new_dict = {self.REORDER_ITEM_SEQ: torch.stack(reorder_seq_list)}
+        interaction.update(Interaction(new_dict))
+        return interaction
+
+
+class TargetItemSequence:
+    """
+    sample sequences with same target item
+    """
+
+    def __init__(self, config, dataset):
+        self.ITEM_ID = config["ITEM_ID_FIELD"]
+        self.ITEM_SEQ = config["ITEM_ID_FIELD"] + config["LIST_SUFFIX"]
+        self.ITEM_SEQ_LEN = config["ITEM_LIST_LENGTH_FIELD"]
+        self.TARGET_ITEM_SEQ_1 = "Target_1_" + self.ITEM_SEQ
+        self.TARGET_ITEM_SEQ_2 = "Target_2_" + self.ITEM_SEQ
+        config["TARGET_ITEM_SEQ_1"] = self.TARGET_ITEM_SEQ_1
+        config["TARGET_ITEM_SEQ_2"] = self.TARGET_ITEM_SEQ_2
+
+        self.target_seq = {}
+        for item_id in dataset.inter_feat[config["ITEM_ID_FIELD"]]:
+            self.target_seq[int(item_id)] = []
+        for i, item_seq in enumerate(dataset.inter_feat[config["ITEM_ID_FIELD"] + config["LIST_SUFFIX"]]):
+            target_item = dataset.inter_feat[config["ITEM_ID_FIELD"]][i]
+            self.target_seq[int(target_item)].append(item_seq.tolist())
+
+    def __call__(self, dataset, interaction):
+        item_seq = interaction[self.ITEM_SEQ]
+        item_seq_len = interaction[self.ITEM_SEQ_LEN]
+        target_items = interaction[self.ITEM_ID].tolist()
+        device = item_seq.device
+        item_seq = item_seq.cpu().numpy()
+        item_seq_len = item_seq_len.cpu().numpy()
+
+        target_seq_1, target_seq_2 = [], []
+        for target_item in target_items:
+            target_seqs = self.target_seq[target_item]
+            target_seq_1.append(random.choice(target_seqs))
+            target_seq_2.append(random.choice(target_seqs))
+
+        target_seq_1 = torch.tensor(target_seq_1, dtype=torch.long, device=device)
+        target_seq_2 = torch.tensor(target_seq_2, dtype=torch.long, device=device)
+
+        new_dict = {self.TARGET_ITEM_SEQ_1: target_seq_1, self.TARGET_ITEM_SEQ_2: target_seq_2}
         interaction.update(Interaction(new_dict))
         return interaction
 

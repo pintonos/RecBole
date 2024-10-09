@@ -54,7 +54,7 @@ class AbstractDataLoader(torch.utils.data.DataLoader):
         index_sampler = None
         self.generator = torch.Generator()
         self.generator.manual_seed(config["seed"])
-        self.transform = construct_transform(config)
+        self.transform = construct_transform(config, dataset)
         self.is_sequential = config["MODEL_TYPE"] == ModelType.SEQUENTIAL
         if not config["single_spec"]:
             index_sampler = torch.utils.data.distributed.DistributedSampler(
