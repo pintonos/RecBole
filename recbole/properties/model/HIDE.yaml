@@ -1,0 +1,15 @@
+embedding_size: 64
+n_layer: 1
+dropout_gcn: 0.2
+
+intent_aware_emb: True
+
+alpha: 0.2
+sparsity: 0.4
+n_factor: 4
+window_size: 6
+w_k: 10
+
+intent_loss_weight: 1e-4
+
+loss_type: 'CE'
