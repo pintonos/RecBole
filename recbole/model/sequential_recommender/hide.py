@@ -148,28 +148,21 @@ class HIDE(SequentialRecommender):
         self.sparsity = config["sparsity"]
 
         self.alpha = config["alpha"]
-        self.intent_aware_emb = config["intent_aware_emb"]
         self.intent_loss_weight = config["intent_loss_weight"]
         self.w_k = config["w_k"]
         self.sw = [2]
-        self.max_edge_num = 100 # TODO
+        self.max_edge_num = 100#self.max_seq_length + 1
 
         self.item_embedding = nn.Embedding(
             self.n_items, self.dim, padding_idx=0
         )
         self.position_embedding = nn.Embedding(self.max_seq_length, self.dim)
 
-        if self.intent_aware_emb:
-            self.feat_latent_dim = self.dim // self.n_factor
-            self.split_sections = [self.feat_latent_dim] * self.n_factor
-        else:
-            self.feat_latent_dim = self.dim
+        self.feat_latent_dim = self.dim // self.n_factor
+        self.split_sections = [self.feat_latent_dim] * self.n_factor
 
-        if self.intent_aware_emb:
-            self.disen_graph = DisentangleGraph(dim=self.feat_latent_dim, alpha=config["alpha"], e=self.sparsity)
-            self.disen_aggs = nn.ModuleList([LocalHyperGATlayer(self.feat_latent_dim, self.n_layer, config["alpha"], config["dropout_gcn"]) for _ in range(self.n_factor)])
-        else:
-            self.local_agg = LocalHyperGATlayer(self.dim, self.n_layer, config["alpha"], config["dropout_gcn"])
+        self.disen_graph = DisentangleGraph(dim=self.feat_latent_dim, alpha=config["alpha"], e=self.sparsity)
+        self.disen_aggs = nn.ModuleList([LocalHyperGATlayer(self.feat_latent_dim, self.n_layer, config["alpha"], config["dropout_gcn"]) for _ in range(self.n_factor)])
 
         self.w_1 = nn.Parameter(torch.Tensor(2 * self.dim, self.dim))
         self.w_2 = nn.Parameter(torch.Tensor(3 * self.dim, 1))
@@ -180,10 +173,9 @@ class HIDE(SequentialRecommender):
 
         self.leakyrelu = nn.LeakyReLU(config["alpha"])
 
-        if self.intent_aware_emb:
-            self.classifier = nn.Linear(self.feat_latent_dim, self.n_factor)
-            self.loss_aux = nn.CrossEntropyLoss()
-            self.intent_loss = 0
+        self.classifier = nn.Linear(self.feat_latent_dim, self.n_factor)
+        self.loss_aux = nn.CrossEntropyLoss()
+        self.intent_loss = 0
 
         if self.loss_type == "BPR":
             self.loss_fct = BPRLoss()
@@ -274,7 +266,7 @@ class HIDE(SequentialRecommender):
         mask = mask.float().unsqueeze(-1)
         batch_size = hidden.shape[0]
         len = hidden.shape[1]
-        pos_emb = self.pos_embedding.weight[:len]
+        pos_emb = self.position_embedding.weight[:len]
         pos_emb = pos_emb.unsqueeze(0).repeat(batch_size, 1, 1)
         hs = torch.sum(hidden * mask, -2) / torch.sum(mask, 1)
         hs = hs.unsqueeze(-2).repeat(1, len, 1)
@@ -287,22 +279,19 @@ class HIDE(SequentialRecommender):
         nh = torch.sigmoid(torch.cat([self.glu1(nh), self.glu2(hs), self.glu3(feat)], -1))
         beta = torch.matmul(nh, self.w_2)
         beta = beta * mask
-        if self.disen:
-            select = torch.sum(beta * hidden, 1)
-            score_all = []
-            select_split = torch.split(select, self.split_sections, dim=-1)
-            b = torch.split(item_embeddings[1:], self.split_sections, dim=-1)
-            for i in range(self.n_factor):
-                sess_emb_int = self.w_k * select_split[i]
-                item_embeddings_int = b[i]
-                scores_int = torch.mm(sess_emb_int, torch.transpose(item_embeddings_int, 1, 0))
-                score_all.append(scores_int)
-            score = torch.stack(score_all, dim=1)
-            scores = score.sum(1)
-        else:
-            select = torch.sum(beta * hidden, 1)
-            b = item_embeddings[1:]
-            scores = torch.matmul(select, b.transpose(1, 0))
+
+        select = torch.sum(beta * hidden, 1)
+        score_all = []
+        select_split = torch.split(select, self.split_sections, dim=-1)
+        b = torch.split(item_embeddings, self.split_sections, dim=-1)
+        for i in range(self.n_factor):
+            sess_emb_int = self.w_k * select_split[i]
+            item_embeddings_int = b[i]
+            scores_int = torch.mm(sess_emb_int, torch.transpose(item_embeddings_int, 1, 0))
+            score_all.append(scores_int)
+        score = torch.stack(score_all, dim=1)
+        scores = score.sum(1)
+
         return scores
 
     def forward(self, inputs, Hs, mask_item, item):
@@ -315,35 +304,34 @@ class HIDE(SequentialRecommender):
         item_emb = item_embeddings[item] * mask_item.float().unsqueeze(-1)
         session_c = torch.sum(item_emb, 1) / torch.sum(mask_item.float(), -1).unsqueeze(-1)
         session_c = session_c.unsqueeze(1)
-        if self.intent_aware_emb:
-            all_items = item_embeddings[1:]
-            intents_cat = torch.mean(all_items, dim=0, keepdim=True)
-            mask_node = torch.ones_like(inputs)
-            zero_vec = torch.zeros_like(inputs)
-            mask_node = torch.where(inputs.eq(0), zero_vec, mask_node)
-            h_split = torch.split(h, self.split_sections, dim=-1)
-            s_split = torch.split(session_c, self.split_sections, dim=-1)
-            intent_split = torch.split(intents_cat, self.split_sections, dim=-1)
-            h_ints = []
-            intents_feat = []
-            for i in range(self.n_factor):
-                h_int = h_split[i]
-                Hs = self.disen_graph(h_int, Hs, intent_split[i], mask_node)
-                h_int = self.disen_aggs[i](h_int, Hs, s_split[i])
 
-                intent_p = intent_split[i].unsqueeze(0).repeat(batch_size, seqs_len, 1)
-                sim_val = h_int * intent_p
-                cor_att = torch.sigmoid(sim_val)
-                h_int = h_int * cor_att + h_int
+        all_items = item_embeddings[1:]
+        intents_cat = torch.mean(all_items, dim=0, keepdim=True)
+        mask_node = torch.ones_like(inputs)
+        zero_vec = torch.zeros_like(inputs)
+        mask_node = torch.where(inputs.eq(0), zero_vec, mask_node)
+        h_split = torch.split(h, self.split_sections, dim=-1)
+        s_split = torch.split(session_c, self.split_sections, dim=-1)
+        intent_split = torch.split(intents_cat, self.split_sections, dim=-1)
+        h_ints = []
+        intents_feat = []
+        for i in range(self.n_factor):
+            h_int = h_split[i]
+            Hs = self.disen_graph(h_int, Hs, intent_split[i], mask_node)
+            h_int = self.disen_aggs[i](h_int, Hs, s_split[i])
 
-                h_ints.append(h_int)
-                intents_feat.append(torch.mean(h_int, dim=1))   # (b ,latent_dim)
+            intent_p = intent_split[i].unsqueeze(0).repeat(batch_size, seqs_len, 1)
+            sim_val = h_int * intent_p
+            cor_att = torch.sigmoid(sim_val)
+            h_int = h_int * cor_att + h_int
 
-            h_stack = torch.stack(h_ints, dim=2)
-            h_local = h_stack.reshape(batch_size, seqs_len, self.dim)
-            self.intent_loss = self.compute_disentangle_loss(intents_feat)
-        else:
-            h_local = self.local_agg(h, Hs, session_c)
+            h_ints.append(h_int)
+            intents_feat.append(torch.mean(h_int, dim=1))   # (b ,latent_dim)
+
+        h_stack = torch.stack(h_ints, dim=2)
+        h_local = h_stack.reshape(batch_size, seqs_len, self.dim)
+        self.intent_loss = self.compute_disentangle_loss(intents_feat)
+
         output = h_local
         return output, item_embeddings
 
@@ -359,16 +347,15 @@ class HIDE(SequentialRecommender):
             neg_items = interaction[self.NEG_ITEM_ID]
             pos_items_emb = self.item_embedding(pos_items)
             neg_items_emb = self.item_embedding(neg_items)
-            pos_score = torch.sum(seq_hidden * pos_items_emb, dim=-1)
-            neg_score = torch.sum(seq_hidden * neg_items_emb, dim=-1)
+            pos_score = self.compute_scores(seq_hidden, mask, pos_items_emb)
+            neg_score = self.compute_scores(seq_hidden, mask, neg_items_emb)
             loss = self.loss_fct(pos_score, neg_score)
         else:
             test_item_emb = self.item_embedding.weight
-            logits = torch.matmul(seq_hidden, test_item_emb.transpose(0, 1))
+            logits = self.compute_scores(seq_hidden, mask, test_item_emb)
             loss = self.loss_fct(logits, pos_items)
 
-        if self.disen:
-            loss += self.intent_loss_weight * self.intent_loss
+        loss += self.intent_loss_weight * self.intent_loss
 
         return loss
 
@@ -380,7 +367,7 @@ class HIDE(SequentialRecommender):
         hidden, item_embeddings = self.forward(items, Hs, mask, alias_inputs)
         seq_hidden = torch.stack([hidden[i][alias_inputs[i]] for i in range(len(alias_inputs))])
         test_item_emb = self.item_embedding(test_item)
-        scores = torch.mul(seq_hidden, test_item_emb).sum(dim=1)
+        scores = self.compute_scores(seq_hidden, mask, test_item_emb)
         return scores
 
     def full_sort_predict(self, interaction):
@@ -390,5 +377,5 @@ class HIDE(SequentialRecommender):
         hidden, item_embeddings = self.forward(items, Hs, mask, alias_inputs)
         seq_hidden = torch.stack([hidden[i][alias_inputs[i]] for i in range(len(alias_inputs))])
         test_items_emb = self.item_embedding.weight
-        scores = torch.matmul(seq_hidden, test_items_emb.transpose(0, 1))
+        scores = self.compute_scores(seq_hidden, mask, test_items_emb)
         return scores
