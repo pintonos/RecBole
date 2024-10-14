@@ -12,4 +12,7 @@ w_k: 10
 
 intent_loss_weight: 1e-4
 
+transform: 'session_hyper_graph'
+train_batch_size: 512
+
 loss_type: 'CE'

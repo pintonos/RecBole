@@ -8,6 +8,7 @@ import numpy as np
 import random
 import torch
 from copy import deepcopy
+import scipy.sparse as sp
 from recbole.data.interaction import Interaction, cat_interactions
 
 
@@ -24,6 +25,7 @@ def construct_transform(config):
             "crop_itemseq": CropItemSequence,
             "reorder_itemseq": ReorderItemSequence,
             "user_defined": UserDefinedTransform,
+            "session_hyper_graph": SessionHyperGraph,
         }
         if config["transform"] not in str2transform:
             raise NotImplementedError(
@@ -300,6 +302,75 @@ class ReorderItemSequence:
         interaction.update(Interaction(new_dict))
         return interaction
 
+class SessionHyperGraph:
+    def __init__(self, config):
+        self.ITEM_SEQ = config["ITEM_ID_FIELD"] + config["LIST_SUFFIX"]
+        self.ITEM_SEQ_LEN = config["ITEM_LIST_LENGTH_FIELD"]
+
+        self.sw = [2]
+        self.max_n_node = 50
+        self.max_n_edge = 100
+
+    def __call__(self, dataset, interaction):
+        device = interaction[self.ITEM_SEQ].device
+
+        all_alias_inputs, all_Hs, all_items, all_mask = [], [], [], []
+
+        for u_input in interaction[self.ITEM_SEQ].cpu().numpy():
+            node = np.unique(u_input)
+            items = node.tolist() + (self.max_n_node - len(node)) * [0]
+            alias_inputs = [np.where(node == i)[0][0] for i in u_input]
+            mask = [1] * len(node) + [0] * (self.max_n_node - len(node))
+
+            rows, cols, vals = [], [], []
+            edge_idx = 0
+
+            # generate slide window hyperedge
+            for win in self.sw:
+                for i in range(len(u_input) - win + 1):
+                    if i + win <= len(u_input):
+                        if u_input[i + win - 1] == 0:
+                            break
+                        for j in range(i, i + win):
+                            rows.append(np.where(node == u_input[j])[0][0])
+                            cols.append(edge_idx)
+                            vals.append(1.0)
+                        edge_idx += 1
+
+            # generate in-item hyperedge, ignore 0
+            for item in node:
+                if item != 0:
+                    for i in range(len(u_input)):
+                        if u_input[i] == item and i > 0:
+                            rows.append(np.where(node == u_input[i - 1])[0][0])
+                            cols.append(edge_idx)
+                            vals.append(2.0)
+                    rows.append(np.where(node == item)[0][0])
+                    cols.append(edge_idx)
+                    vals.append(2.0)
+                    edge_idx += 1
+
+            u_Hs = sp.coo_matrix((vals, (rows, cols)), shape=(self.max_n_node, self.max_n_edge))
+            Hs = np.asarray(u_Hs.todense())
+
+            alias_inputs = torch.LongTensor(alias_inputs).to(device)
+            Hs = torch.FloatTensor(Hs).to(device)
+            items = torch.LongTensor(items).to(device)
+            mask = torch.BoolTensor(mask).to(device)
+
+            all_alias_inputs.append(alias_inputs)
+            all_Hs.append(Hs)
+            all_items.append(items)
+            all_mask.append(mask)
+
+        all_alias_inputs = torch.stack(all_alias_inputs)
+        all_Hs = torch.stack(all_Hs)
+        all_items = torch.stack(all_items)
+        all_mask = torch.stack(all_mask)
+
+        new_dict = {"alias_inputs": all_alias_inputs, "Hs": all_Hs, "items": all_items, "mask": all_mask}
+        interaction.update(Interaction(new_dict))
+        return interaction
 
 class UserDefinedTransform:
     def __init__(self, config):
