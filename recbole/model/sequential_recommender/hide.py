@@ -150,8 +150,11 @@ class HIDE(SequentialRecommender):
         self.alpha = config["alpha"]
         self.intent_loss_weight = config["intent_loss_weight"]
         self.w_k = config["w_k"]
-        self.sw = [2]
-        self.max_edge_num = 100#self.max_seq_length + 1
+        
+        # same as in transform
+        self.sw = [2, 3, 4, 5, 6]
+        self.max_n_node = config["MAX_ITEM_LIST_LENGTH"]
+        self.max_n_edge = 300
 
         self.item_embedding = nn.Embedding(
             self.n_items, self.dim, padding_idx=0
@@ -200,12 +203,15 @@ class HIDE(SequentialRecommender):
         discrimination_loss = self.loss_aux(pred, labels)
         return discrimination_loss
 
-    def compute_scores(self, hidden, mask, item_embeddings):
+    def compute_scores(self, hidden, mask, item_embeddings, full=False):
         mask = mask.float().unsqueeze(-1)
         batch_size = hidden.shape[0]
         len = hidden.shape[1]
+
         pos_emb = self.position_embedding.weight[:len]
+        pos_emb = torch.flip(pos_emb, [0])  # reverse order
         pos_emb = pos_emb.unsqueeze(0).repeat(batch_size, 1, 1)
+
         hs = torch.sum(hidden * mask, -2) / torch.sum(mask, 1)
         hs = hs.unsqueeze(-2).repeat(1, len, 1)
         ht = hidden[:, 0, :]
@@ -219,13 +225,17 @@ class HIDE(SequentialRecommender):
         beta = beta * mask
 
         select = torch.sum(beta * hidden, 1)
+
         score_all = []
         select_split = torch.split(select, self.split_sections, dim=-1)
         b = torch.split(item_embeddings, self.split_sections, dim=-1)
         for i in range(self.n_factor):
             sess_emb_int = self.w_k * select_split[i]
             item_embeddings_int = b[i]
-            scores_int = torch.mm(sess_emb_int, torch.transpose(item_embeddings_int, 1, 0))
+            if full:
+                scores_int = torch.matmul(sess_emb_int, item_embeddings_int.transpose(0, 1))
+            else:
+                scores_int = torch.mul(sess_emb_int, item_embeddings_int).sum(dim=1)
             score_all.append(scores_int)
         score = torch.stack(score_all, dim=1)
         scores = score.sum(1)
@@ -235,15 +245,13 @@ class HIDE(SequentialRecommender):
     def forward(self, inputs, Hs, mask_item, item):
         batch_size = inputs.shape[0]
         seqs_len = inputs.shape[1]
-        item_embeddings = self.item_embedding.weight
-        zeros = torch.zeros(1, self.dim).to(self.device)
-        item_embeddings = torch.cat([zeros, item_embeddings], 0)
-        h = item_embeddings[inputs]
-        item_emb = item_embeddings[item] * mask_item.float().unsqueeze(-1)
+
+        h = self.item_embedding(inputs)
+        item_emb = self.item_embedding(item) * mask_item.float().unsqueeze(-1)
         session_c = torch.sum(item_emb, 1) / torch.sum(mask_item.float(), -1).unsqueeze(-1)
         session_c = session_c.unsqueeze(1)
 
-        all_items = item_embeddings[1:]
+        all_items = self.item_embedding.weight[1:]
         intents_cat = torch.mean(all_items, dim=0, keepdim=True)
         mask_node = torch.ones_like(inputs)
         zero_vec = torch.zeros_like(inputs)
@@ -270,13 +278,13 @@ class HIDE(SequentialRecommender):
         h_local = h_stack.reshape(batch_size, seqs_len, self.dim)
         self.intent_loss = self.compute_disentangle_loss(intents_feat)
 
-        output = h_local
-        return output, item_embeddings
+        return h_local
 
     def calculate_loss(self, interaction):
         alias_inputs, Hs, items, mask = interaction["alias_inputs"], interaction["Hs"], interaction["items"], interaction["mask"]
-        hidden, item_embeddings = self.forward(items, Hs, mask, alias_inputs)
+        hidden = self.forward(items, Hs, mask, alias_inputs)
         seq_hidden = torch.stack([hidden[i][alias_inputs[i]] for i in range(len(alias_inputs))])
+
         pos_items = interaction[self.POS_ITEM_ID]
 
         if self.loss_type == "BPR":
@@ -287,8 +295,7 @@ class HIDE(SequentialRecommender):
             neg_score = self.compute_scores(seq_hidden, mask, neg_items_emb)
             loss = self.loss_fct(pos_score, neg_score)
         else:
-            test_item_emb = self.item_embedding.weight
-            logits = self.compute_scores(seq_hidden, mask, test_item_emb)
+            logits = self.compute_scores(seq_hidden, mask, self.item_embedding.weight, full=True)
             loss = self.loss_fct(logits, pos_items)
 
         loss += self.intent_loss_weight * self.intent_loss
@@ -297,17 +304,75 @@ class HIDE(SequentialRecommender):
 
     def predict(self, interaction):
         test_item = interaction[self.ITEM_ID]
-        alias_inputs, Hs, items, mask = interaction["alias_inputs"], interaction["Hs"], interaction["items"], interaction["mask"]
-        hidden, item_embeddings = self.forward(items, Hs, mask, alias_inputs)
+        alias_inputs, Hs, items, mask = self._get_slice(interaction[self.ITEM_SEQ])
+        hidden = self.forward(items, Hs, mask, alias_inputs)
         seq_hidden = torch.stack([hidden[i][alias_inputs[i]] for i in range(len(alias_inputs))])
         test_item_emb = self.item_embedding(test_item)
         scores = self.compute_scores(seq_hidden, mask, test_item_emb)
         return scores
 
     def full_sort_predict(self, interaction):
-        alias_inputs, Hs, items, mask = interaction["alias_inputs"], interaction["Hs"], interaction["items"], interaction["mask"]
-        hidden, item_embeddings = self.forward(items, Hs, mask, alias_inputs)
+        alias_inputs, Hs, items, mask = self._get_slice(interaction[self.ITEM_SEQ])
+        hidden = self.forward(items, Hs, mask, alias_inputs)
         seq_hidden = torch.stack([hidden[i][alias_inputs[i]] for i in range(len(alias_inputs))])
-        test_items_emb = self.item_embedding.weight
-        scores = self.compute_scores(seq_hidden, mask, test_items_emb)
+        scores = self.compute_scores(seq_hidden, mask, self.item_embedding.weight, full=True)
         return scores
+
+    def _get_slice(self, item_seq):
+        item_seq = item_seq.cpu().numpy()
+
+        all_alias_inputs, all_Hs, all_items, all_mask = [], [], [], []
+
+        for u_input in item_seq:
+            node = np.unique(u_input)
+            items = node.tolist() + (self.max_n_node - len(node)) * [0]
+            alias_inputs = [np.where(node == i)[0][0] for i in u_input]
+            mask = [1] * len(node) + [0] * (self.max_n_node - len(node))
+
+            rows, cols, vals = [], [], []
+            edge_idx = 0
+
+            # generate slide window hyperedge
+            for win in self.sw:
+                for i in range(len(u_input) - win + 1):
+                    if i + win <= len(u_input):
+                        if u_input[i + win - 1] == 0:
+                            break
+                        for j in range(i, i + win):
+                            rows.append(np.where(node == u_input[j])[0][0])
+                            cols.append(edge_idx)
+                            vals.append(1.0)
+                        edge_idx += 1
+
+            # generate in-item hyperedge, ignore 0
+            for item in node:
+                if item != 0:
+                    for i in range(len(u_input)):
+                        if u_input[i] == item and i > 0:
+                            rows.append(np.where(node == u_input[i - 1])[0][0])
+                            cols.append(edge_idx)
+                            vals.append(2.0)
+                    rows.append(np.where(node == item)[0][0])
+                    cols.append(edge_idx)
+                    vals.append(2.0)
+                    edge_idx += 1
+
+            u_Hs = sp.coo_matrix((vals, (rows, cols)), shape=(self.max_n_node, self.max_n_edge))
+            Hs = np.asarray(u_Hs.todense())
+
+            alias_inputs = torch.LongTensor(alias_inputs).to(self.device)
+            Hs = torch.FloatTensor(Hs).to(self.device)
+            items = torch.LongTensor(items).to(self.device)
+            mask = torch.BoolTensor(mask).to(self.device)
+
+            all_alias_inputs.append(alias_inputs)
+            all_Hs.append(Hs)
+            all_items.append(items)
+            all_mask.append(mask)
+
+        all_alias_inputs = torch.stack(all_alias_inputs)
+        all_Hs = torch.stack(all_Hs)
+        all_items = torch.stack(all_items)
+        all_mask = torch.stack(all_mask)
+
+        return all_alias_inputs, all_Hs, all_items, all_mask
