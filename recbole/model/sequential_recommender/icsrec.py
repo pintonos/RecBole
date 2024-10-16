@@ -37,7 +37,6 @@ class ICSRec(SequentialRecommender):
         self.layer_norm_eps = config['layer_norm_eps']
 
         self.n_clusters = config['n_clusters']
-        self.f_neg = config['f_neg']
         self.sim = config['sim']
         self.temperature = config['temperature']
 
@@ -56,9 +55,6 @@ class ICSRec(SequentialRecommender):
             hidden_size=self.hidden_size,
             device=self.device,
         )
-
-        self.clusters = [self.cluster]
-        self.clusters_t = [self.clusters]
 
         # define layers and loss
         self.item_embedding = nn.Embedding(
@@ -79,15 +75,17 @@ class ICSRec(SequentialRecommender):
         self.LayerNorm = nn.LayerNorm(self.hidden_size, eps=self.layer_norm_eps)
         self.dropout = nn.Dropout(self.hidden_dropout_prob)
 
-        if self.loss_type == 'BPR':
+        if self.loss_type == "BPR":
             self.loss_fct = BPRLoss()
-        elif self.loss_type == 'CE':
+        elif self.loss_type == "CE":
             self.loss_fct = nn.CrossEntropyLoss()
         else:
             raise NotImplementedError("Make sure 'loss_type' in ['BPR', 'CE']!")
 
         # parameters initialization
         self.apply(self._init_weights)
+
+        #self.other_parameter_name = ["cluster"]
 
     def _init_weights(self, module):
         """ Initialize the weights """
@@ -111,12 +109,7 @@ class ICSRec(SequentialRecommender):
             kmeans_training_data.append(seq_output.detach().cpu())
 
         kmeans_training_data = torch.concat(kmeans_training_data, axis=0)
-        kmeans_training_data_t = [kmeans_training_data]
-
-        for i, clusters in enumerate(self.clusters_t):
-            for j, cluster in enumerate(clusters):
-                cluster.train(kmeans_training_data_t[i])
-                self.clusters_t[i][j] = cluster
+        self.cluster.train(kmeans_training_data)
 
 
     def get_attention_mask(self, item_seq):
@@ -176,7 +169,7 @@ class ICSRec(SequentialRecommender):
         target_seq_output = self.forward(target_item_seq, target_item_seq_len)
 
         cicl_loss = self.cicl_loss(seq_output, target_seq_output, pos_items)
-        ficl_loss = self.ficl_loss(seq_output, target_seq_output, self.clusters_t[0])
+        ficl_loss = self.ficl_loss(seq_output, target_seq_output)
 
         return loss + (self.cicl_loss_weight * cicl_loss) + (self.ficl_loss_weight * ficl_loss)
 
@@ -188,12 +181,12 @@ class ICSRec(SequentialRecommender):
         return cicl_loss
 
 
-    def ficl_loss(self, coarse_intent_1, coarse_intent_2, clusters_t):
-        intent_id, seq_to_v = clusters_t[0].query(coarse_intent_1)
+    def ficl_loss(self, coarse_intent_1, coarse_intent_2):
+        intent_id, seq_to_v = self.cluster.query(coarse_intent_1)
         a, b = self.info_nce(coarse_intent_1, seq_to_v, self.temperature, coarse_intent_1.shape[0], sim=self.sim, intent_id=intent_id)
         loss_n_0 = nn.CrossEntropyLoss()(a, b)
 
-        intent_id, seq_to_v_1 = clusters_t[0].query(coarse_intent_2)  # [BxH]
+        intent_id, seq_to_v_1 = self.cluster.query(coarse_intent_2)  # [BxH]
         a, b = self.info_nce(coarse_intent_2, seq_to_v_1, self.temperature, coarse_intent_2.shape[0], sim=self.sim, intent_id=intent_id)
         loss_n_1 = nn.CrossEntropyLoss()(a, b)
 
@@ -201,17 +194,8 @@ class ICSRec(SequentialRecommender):
 
         return ficl_loss
 
-    def mask_correlated_samples(self, batch_size):
-        N = 2 * batch_size
-        mask = torch.ones((N, N), dtype=torch.bool)
-        mask = mask.fill_diagonal_(0)
-        for i in range(batch_size):
-            mask[i, batch_size + i] = 0
-            mask[batch_size + i, i] = 0
-        return mask
-
     # False Negative Mask
-    def mask_correlated_samples_(self, label):
+    def mask_correlated_samples(self, label):
         label = label.view(1, -1)
         label = label.expand((2, label.shape[-1])).reshape(1, -1)
         label = label.contiguous().view(-1, 1)
@@ -235,13 +219,9 @@ class ICSRec(SequentialRecommender):
 
         positive_samples = torch.cat((sim_i_j, sim_j_i), dim=0).reshape(N, 1)
 
-        if self.f_neg:
-            mask = self.mask_correlated_samples_(intent_id)
-            negative_samples = sim
-            negative_samples[mask == 0] = float("-inf")
-        else:
-            mask = self.mask_correlated_samples(batch_size)
-            negative_samples = sim[mask].reshape(N, -1)
+        mask = self.mask_correlated_samples(intent_id)
+        negative_samples = sim
+        negative_samples[mask == 0] = float("-inf")
 
         labels = torch.zeros(N).to(positive_samples.device).long()
         logits = torch.cat((positive_samples, negative_samples), dim=1)
@@ -263,3 +243,4 @@ class ICSRec(SequentialRecommender):
         test_items_emb = self.item_embedding.weight
         scores = torch.matmul(seq_output, test_items_emb.transpose(0, 1))  # [B n_items]
         return scores
+
